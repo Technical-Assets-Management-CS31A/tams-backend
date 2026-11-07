@@ -41,6 +41,16 @@ public static class AuthSetup
                     NameClaimType = "sub",
                     RoleClaimType = "role",
                 };
+                // Browsers cannot set headers on a WebSocket, so the SignalR hub takes ?access_token= (hub path only).
+                o.Events = new JwtBearerEvents
+                {
+                    OnMessageReceived = ctx =>
+                    {
+                        var token = ctx.Request.Query["access_token"].ToString();
+                        if (token.Length > 0 && ctx.HttpContext.Request.Path.StartsWithSegments("/hubs")) ctx.Token = token;
+                        return Task.CompletedTask;
+                    },
+                };
             });
         services.AddAuthorization();
         return services;
