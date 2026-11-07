@@ -29,6 +29,7 @@ public static class StudentEndpoints
         var students = app.MapGroup("/students").WithTags("Students");
         students.MapGet("/", ListStudents).RequireRoles(Readers);
         students.MapGet("/{id:guid}", GetStudent).RequireRoles(Readers);
+        students.MapPost("/", CreateStudent).RequireRoles(Writers);
         students.MapPut("/{id:guid}", UpdateStudent).RequireRoles(Writers);
         students.MapDelete("/{id:guid}", DeleteStudent).RequireRoles(Writers);
         students.MapPost("/{id:guid}/restore", RestoreStudent).RequireRoles(Roles.Admin);
@@ -201,6 +202,38 @@ public static class StudentEndpoints
     }
 
     static object StudentAudit(Student s) => new { s.StudentNo, s.SectionId, s.Status, s.DeletedAt };
+
+    /// <summary>PRD 6.3 POST /students: one student without a roster file (late enrollees).</summary>
+    static async Task<IResult> CreateStudent(StudentBody b, TamsDbContext db, HttpContext http, CancellationToken ct)
+    {
+        var errors = new Dictionary<string, string[]>();
+        if (string.IsNullOrWhiteSpace(b.StudentNo) || b.StudentNo.Trim().Length > 20) errors["studentNo"] = ["Required, up to 20 characters."];
+        if (string.IsNullOrWhiteSpace(b.FirstName) || b.FirstName.Trim().Length > 80) errors["firstName"] = ["Required, up to 80 characters."];
+        if (string.IsNullOrWhiteSpace(b.LastName) || b.LastName.Trim().Length > 80) errors["lastName"] = ["Required, up to 80 characters."];
+        if (b.SectionId is null) errors["sectionId"] = ["Required."];
+        if (errors.Count > 0) return Problems.Validation(errors);
+
+        var no = b.StudentNo!.Trim();
+        if (await db.Students.AnyAsync(x => x.DeletedAt == null && x.StudentNo == no, ct))
+            return Problems.Conflict("STUDENT_NO_TAKEN", "Another student already has this student number.");
+        if (!await db.Sections.AnyAsync(x => x.Id == b.SectionId, ct))
+            return Problems.BadRequest("SECTION_NOT_FOUND", "sectionId does not match an existing section.");
+
+        var now = DateTimeOffset.UtcNow;
+        var s = new Student
+        {
+            Id = Guid.NewGuid(), StudentNo = no, FirstName = b.FirstName!.Trim(), LastName = b.LastName!.Trim(),
+            SectionId = b.SectionId!.Value, Status = b.Status ?? RecordStatus.Active, CreatedAt = now, UpdatedAt = now,
+        };
+        db.Students.Add(s);
+        Audit(db, http, "STUDENT_CREATE", "student", s.Id, after: StudentAudit(s));
+        try { await db.SaveChangesAsync(ct); }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            return Problems.Conflict("STUDENT_NO_TAKEN", "Another student already has this student number.");
+        }
+        return Results.Created($"/api/students/{s.Id}", await StudentRows(db, db.Students.AsNoTracking().Where(x => x.Id == s.Id)).FirstAsync(ct));
+    }
 
     static async Task<IResult> UpdateStudent(Guid id, StudentBody b, TamsDbContext db, HttpContext http, CancellationToken ct)
     {

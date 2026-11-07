@@ -30,7 +30,7 @@ static class AssetEndpoints
 
     static async Task<IResult> List(
         HttpContext http, TamsDbContext db, CancellationToken ct,
-        Guid? categoryId, Guid? homeRoomId, string? status, string? type, string? q, string? sort,
+        Guid? categoryId, Guid? homeRoomId, Guid? borrowerStudentId, string? status, string? type, string? q, string? sort,
         bool includeDeleted = false, int page = 1, int pageSize = 25)
     {
         if (includeDeleted && !http.User.IsInRole(Roles.Admin) && !http.User.IsInRole(Roles.TechStaff))
@@ -61,6 +61,9 @@ static class AssetEndpoints
         if (!includeDeleted) query = query.Where(a => a.DeletedAt == null);
         if (categoryId is not null) query = query.Where(a => a.CategoryId == categoryId);
         if (homeRoomId is not null) query = query.Where(a => a.HomeRoomId == homeRoomId);
+        // FR-4.4 "borrower history": assets this student has ever borrowed or returned.
+        if (borrowerStudentId is not null)
+            query = query.Where(a => db.Loans.Any(l => l.AssetId == a.Id && (l.StudentId == borrowerStudentId || l.ReturnedByStudentId == borrowerStudentId)));
         if (statusFilter is not null) query = query.Where(a => a.Status == statusFilter);
         if (typeFilter is not null) query = query.Where(a => a.Type == typeFilter);
         if (!string.IsNullOrWhiteSpace(q))
