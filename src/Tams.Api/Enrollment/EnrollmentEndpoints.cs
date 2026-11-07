@@ -155,13 +155,13 @@ public static class EnrollmentEndpoints
 
     // ---------------------------------------------------------------- kiosk
 
-    static async Task<IResult> KioskGet(Guid id, HttpContext http, TamsDbContext db, CancellationToken ct)
+    internal static async Task<IResult> KioskGet(Guid id, HttpContext http, TamsDbContext db, CancellationToken ct)
     {
         var (s, deny) = await KioskSessionAsync(id, http, db, ct);
         return deny ?? Results.Ok(KioskView(s!));
     }
 
-    static async Task<IResult> KioskSubmit(Guid id, SubmitFingerprintRequest req, HttpContext http, TamsDbContext db, ISettings settings, CancellationToken ct)
+    internal static async Task<IResult> KioskSubmit(Guid id, SubmitFingerprintRequest req, HttpContext http, TamsDbContext db, ISettings settings, CancellationToken ct)
     {
         var (s, deny) = await KioskSessionAsync(id, http, db, ct);
         if (deny is not null) return deny;
@@ -227,7 +227,7 @@ public static class EnrollmentEndpoints
         return Results.Ok(KioskView(fresh!));
     }
 
-    static async Task<IResult> KioskConfirm(Guid id, HttpContext http, TamsDbContext db, CancellationToken ct)
+    internal static async Task<IResult> KioskConfirm(Guid id, HttpContext http, TamsDbContext db, CancellationToken ct)
     {
         var (s, deny) = await KioskSessionAsync(id, http, db, ct);
         if (deny is not null) return deny;
@@ -253,7 +253,7 @@ public static class EnrollmentEndpoints
         return Results.Ok(KioskView((await FindAsync(db, id, ct))!));
     }
 
-    static async Task<IResult> KioskCancel(Guid id, HttpContext http, TamsDbContext db, CancellationToken ct)
+    internal static async Task<IResult> KioskCancel(Guid id, HttpContext http, TamsDbContext db, CancellationToken ct)
     {
         var (s, deny) = await KioskSessionAsync(id, http, db, ct);
         return deny ?? await CancelAsync(db, s!, ct, KioskView);
@@ -309,7 +309,7 @@ public static class EnrollmentEndpoints
 
     static object StaffView(CheckoutSession s) => new
     {
-        id = s.Id, status = s.Status.ToString(), s.StudentId, s.StationId,
+        id = s.Id, status = Facilities.Support.Label(s.Status), s.StudentId, s.StationId,
         fingerIndex = FingerOf(s), s.ExpiresAt, s.CreatedAt, s.CompletedAt, s.FailureCode,
     };
 
@@ -317,8 +317,12 @@ public static class EnrollmentEndpoints
     {
         return new
         {
-            sessionId = s.Id, status = s.Status.ToString(), fingerIndex = FingerOf(s),
-            lcdLines = LcdJson.Read(s), s.ExpiresAt, finished = !IsOpen(s.Status),
+            sessionId = s.Id, type = Facilities.Support.Label(s.Type), status = Facilities.Support.Label(s.Status),
+            nextStep = s.Status switch
+            {
+                SessionStatus.AwaitingFingerprint => "FINGERPRINT", SessionStatus.AwaitingConfirm => "CONFIRM", _ => "DONE",
+            },
+            fingerIndex = FingerOf(s), lcdLines = LcdJson.Read(s), s.ExpiresAt, finished = !IsOpen(s.Status), failureCode = s.FailureCode,
         };
     }
 }

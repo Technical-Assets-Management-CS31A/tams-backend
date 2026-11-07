@@ -20,13 +20,23 @@ public static class StationAuth
 
     public static bool IsStationAuthenticated(HttpContext http, Station station)
     {
-        if (station.DeletedAt is not null || station.Status != RecordStatus.Active) return false;
         if (station.Type != StationType.CounterKiosk) return false;
 
         var presented = http.Request.Headers[StationCodeHeader].ToString().Trim();
         if (presented.Length == 0
             || !string.Equals(presented, station.StationCode, StringComparison.OrdinalIgnoreCase))
             return false;
+
+        return IsDeviceAllowed(http, station);
+    }
+
+    /// <summary>
+    /// Room-station scans and heartbeats name the station in the path (/stations/{code}/...), so only rule 2
+    /// applies on top of the station being live and active.
+    /// </summary>
+    public static bool IsDeviceAllowed(HttpContext http, Station station)
+    {
+        if (station.DeletedAt is not null || station.Status != RecordStatus.Active) return false;
 
         var config = http.RequestServices.GetRequiredService<IConfiguration>();
         if (!config.GetValue<bool>("Kiosk:EnforceIp")) return true;
