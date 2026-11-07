@@ -12,6 +12,12 @@ using Tams.Api.Users;
 using Tams.Api.Students;
 using Tams.Api.Settings;
 using Tams.Api.Qr;
+using Tams.Api.Events;
+using Tams.Api.Inventory;
+using Tams.Api.Kiosk;
+using Tams.Api.Live;
+using Tams.Api.Loans;
+using Tams.Api.Violations;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,6 +33,8 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
 builder.Services.AddDbContext<TamsDbContext>(o => o.UseNpgsql(connectionString, PgEnums.MapAll));
 builder.Services.AddTamsSettings();
 builder.Services.AddHostedService<EnrollmentSweeper>();
+builder.Services.AddHostedService<LoanSweeper>();
+builder.Services.AddSignalR();
 
 // Fingerprint templates are encrypted with Data Protection; the key ring must survive container
 // rebuilds (Compose mounts the dp-keys volume at /app/keys) or stored templates become unreadable.
@@ -74,6 +82,15 @@ app.MapQrEndpoints();
 app.MapFacilityEndpoints();
 app.MapSettingsEndpoints();
 app.MapAuditLogEndpoints();
+app.MapKioskEndpoints();
+app.MapApprovalEndpoints();
+app.MapDeviceEndpoints();
+app.MapLoanEndpoints();
+app.MapViolationEndpoints();
+app.MapEventEndpoints();
+app.MapInventoryAuditEndpoints();
+app.MapNotificationEndpoints();
+app.MapHub<LiveHub>("/hubs/live").RequireAuthorization(Policies.AnyUser); // PRD 6.4
 
 // Compose healthcheck polls this, and it is the first thing to check after a deploy.
 app.MapGet("/health", async (TamsDbContext db, ILogger<Program> logger, CancellationToken ct) =>

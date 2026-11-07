@@ -62,16 +62,39 @@ docker-compose.yml      the three services
 Caddyfile               reverse proxy and TLS
 .env.example            copy to .env
 Tams.slnx
-src/Tams.Api/           minimal API; /health is the only endpoint so far
+src/Tams.Api/           minimal API, one folder per feature
 src/Tams.Api/Data/      TamsDbContext, entities, enums, migrations (schema v1)
+src/Tams.Api/Kiosk/     kiosk sessions, approvals, room scans, heartbeats
+src/Tams.Api/Loans/     loan rules and penalties, loans, anomalies, dashboard, LoanSweeper
+docs/STATUS.md          what is built, decisions, open questions
 ```
 
-## What is not here yet
+## Kiosk and stations
 
-This is the Compose skeleton (TAMS-20). Still to come:
+Devices hold no credentials (FR-1.4). The counter kiosk sends `X-Station-Code: <station_code>` on
+every call; room stations name themselves in the path. Every kiosk response has the same shape:
+`sessionId`, `type`, `status`, `nextStep` (`FINGERPRINT`, `ASSET`, `PHOTO`, `WAIT`, `CONFIRM`, `DONE`),
+the 4 `lcdLines` to show, `failureCode` and `pollIntervalSeconds`. A denial is `status: FAILED` with
+the reason already on the LCD lines, not an HTTP error.
 
-- Auth, CRUD, roster import — Sprint 1.
-- The SignalR hub — the Caddy side is already correct, so the hub is just a map call.
+| Step | Call |
+|---|---|
+| Idle poll (picks up a staff-started enrollment) | `GET /api/kiosk/{code}/session` |
+| Card tap (or `{"type":"RETURN"}` to return an item) | `POST /api/kiosk/{code}/sessions` `{"cardUid":"A1B2C3D4"}` |
+| Fingerprint (base64 template) | `POST /api/kiosk/sessions/{id}/fingerprint` `{"template":"..."}` |
+| Item tag | `POST /api/kiosk/sessions/{id}/asset` `{"tagUid":"04A1B2C3"}` |
+| Photo (multipart `file`, JPEG; no file = camera failed) | `POST /api/kiosk/sessions/{id}/photo` |
+| Poll every 2 s while `WAIT` | `GET /api/kiosk/sessions/{id}` |
+| OK / X buttons (OK is also "Done" in batch modes) | `POST /api/kiosk/sessions/{id}/confirm`, `.../cancel` |
+| Room station scan; reply `signal` is `SUCCESS` (green, chime) or `ERROR` (red, low tone) | `POST /api/stations/{code}/scans` `{"tagUid":"..."}` |
+| Heartbeat every 30 to 60 s | `POST /api/stations/{code}/heartbeat` `{"firmwareVersion":"1.0.3","rssi":-61,"uptimeS":1200,"freeHeap":180000}` |
+
+The instructor approves from the phone (`GET /api/approvals/pending`, `POST /api/approvals/{sessionId}/approve`).
+Live events (PRD 6.4) arrive over SignalR at `/hubs/live?access_token=<jwt>`. Background jobs:
+`LoanSweeper` (transit timeouts, overdue, kiosk session expiry, station health).
+
+**The fingerprint matcher is a placeholder** (exact template equality, see `docs/STATUS.md`). A real
+sensor will not match until it is replaced.
 
 ## Database migrations
 

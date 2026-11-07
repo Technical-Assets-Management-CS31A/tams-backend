@@ -1,8 +1,8 @@
 # TAMS Backend: Status
 
-Last updated: 2026-11-07. Branch of record: `pre-dev` (d6dc7f5). `dev` is still the Compose skeleton and has not been promoted.
+Last updated: 2026-11-07. Branch of record: `pre-dev` (d6dc7f5), with `feature/prd-transaction-core` on top of it (the rest of the PRD backend, below). `dev` is still the Compose skeleton and has not been promoted.
 
-**Read this first:** none of this code has run against PostgreSQL. Docker was not available while it was written. It builds with 0 warnings and 0 errors, and the one test passes, but both migrations, every query and every flow are unexercised. The first job is to run the stack (see Next steps).
+**Read this first:** `feature/prd-transaction-core` has been run against PostgreSQL 17. Both migrations applied cleanly on an empty database, and an 80-check end-to-end run passed. It covered seeding through the pre-dev endpoints (rooms, stations, categories, assets, users, cards, sections, students, settings), enrollment, checkout, approval, room check-in, return, transit timeout, overdue, missing, settlement, events, audits, notifications and the SignalR handshake. The sweeper paths were forced by moving deadlines in the database. Builds with 0 warnings, 11 tests pass. The fingerprint matcher is a placeholder (see Open decisions #1), so the kiosk cannot be piloted with a real sensor yet.
 
 ## Branches
 
@@ -23,6 +23,7 @@ Last updated: 2026-11-07. Branch of record: `pre-dev` (d6dc7f5). `dev` is still 
 | TAMS-43 | `feature/TAMS-43-asset-qr-endpoint` | `GET /assets/{id}/qr`, `POST /assets/qr-sheet` (PDF) |
 | (fixes) | `fix/conformance-api-behaviour` | Post-audit API fixes, `GET /audit-log` |
 | (fixes) | `fix/conformance-schema-auth-enrollment` | Migration 2, refresh-token rotation, enrollment fixes |
+| (PRD rest) | `feature/prd-transaction-core` | From `pre-dev`. Kiosk checkout, return and event batch/return sessions (F1, F5), approvals (F2), room scans (F3), loans, anomalies, dashboard and occupancy (F4), penalties and resolution (F6), audits, reports, checklist export/import (F7), heartbeats and health sweep (F8), `POST /students`, notifications, SignalR hub. No new migration. |
 
 Only `dev` and `main` exist on origin. Everything else is local until pushed.
 
@@ -40,16 +41,32 @@ Jira (project TAMS): TAMS-19 and TAMS-21 are in Deep Review and assumed approved
 - **Error codes** worth knowing are in `Http/ErrorCodes.cs`.
 - **Authorization** is explicit per endpoint (`.RequireRoles(...)` or a policy). The coverage test (`tests/Tams.Api.Tests`) fails if any endpoint lacks it or is anonymous without being allow-listed.
 
+### Transaction core (`feature/prd-transaction-core`)
+
+- **Kiosk protocol** (PRD 6.2) lives in `Kiosk/`. Every kiosk call sends `X-Station-Code`. A denial is a `FAILED` session with a `failureCode` and the 4 LCD lines, returned with HTTP 200, so the firmware always reads one shape. Problem responses mean protocol errors (bad input, wrong state). `nextStep` tells the kiosk what to collect next. Every mutation locks the session row (`SELECT ... FOR UPDATE`), so the kiosk, the phone and the sweeper never race.
+- A new card tap or RETURN start **supersedes** whatever the kiosk had open. A staff-started enrollment blocks the kiosk (`STATION_BUSY`) until it ends. The idle kiosk polls `GET /kiosk/{code}/session` to pick it up.
+- The item is held **`AT_COUNTER`** from the tag tap until the loan is created. Any other end (fail, decline, cancel, expiry) puts it back to `IN_STORAGE`.
+- **Return** closes the loan on the tag tap, with no confirm step (US-03). It works from `ACTIVE`, `OVERDUE` and `MISSING`. Holds, freezes and liabilities stay for staff.
+- **Event batch**: a coordinator's card during their running event opens `EVENT_BATCH`; `type` in the start body forces `CHECKOUT` or `EVENT_RETURN`. Each tap is a loan due at event end + grace. Without a station at the venue, custody is `NOT_REQUIRED` and the asset shows `IN_ROOM_VERIFIED`, because there is no "at event" asset status. Bulk return closes each loan as it is tapped, and Done ends the session.
+- **Penalties** (F6) live in `Loans/LoanRules.cs`. One warning per loan. Warning n > `late_arrival_warning_limit` also brings a mark and a freeze. Overdue brings a mark, a hold and a freeze, each at most once per loan. Missing brings a liability at the replacement cost (or the amount given), plus a hold and a freeze if none are active. Standing is `BLOCKED` at `marks_before_block` active marks, `WARNED` with any active warning or mark, otherwise `GOOD`. The cached counters on `students` are recomputed after every change. Nothing lifts automatically, except that settling a liability lifts that loan's hold and freeze (US-10). Every penalty action writes an `audit_log` row.
+- **School term** is derived from the local date (Aug-Dec = 1, Jan-May = 2, Jun-Jul = 3, Asia/Manila). `reset-term` clears active warnings from earlier terms and leaves `clear_reason` empty, per schema-v1-decisions section 3.
+- **Sweeper** (`LoanSweeper`): every 5 s it expires kiosk sessions and recomputes station health, so a station shows Offline within seconds (US-15). Every 15 s it handles transit timeouts, overdue loans and events that have started. A room tap that beats the sweeper runs the timeout first, so the warning is still issued.
+- **Station health** allows 3 s of slack per window (`StationHealthRules.SlackSeconds`, a calibration knob). The station IP stored is the address the API sees, not one the device reports.
+- **SignalR** hub at `/hubs/live`. JWT goes in `?access_token=`. Groups are `staff` (ADMIN, TECH_STAFF, CUSTODIAN) and `user:{id}`. Events are sent after commit, with the PRD 6.4 names.
+- `max_active_loans_per_student` (FR-1.9, default 1) was added to settings. This resolves the old open decision on that setting.
+- Enrollment sessions also answer on the PRD's `/kiosk/sessions/{id}/...` paths. Enrollment views now return `UPPER_SNAKE` status like the rest of the API, which is a change from PascalCase.
+
 ## Open decisions (not made, behaviour documented in `PERMISSIONS.md`)
 
-1. **`max_active_loans_per_student`:** TAMS-42's Jira text names it, the PRD has no such rule. Add it with an invented default, or drop it from the ticket.
-2. **Custodian fingerprint rights:** custodians can start enrollments and delete fingerprints; FR-9.4 says "admin-initiated".
-3. **Kiosk enrollment paths:** the code uses `/kiosk/enrollment/sessions/...`; the PRD says enrollment shares `/api/kiosk/sessions/{id}/...`. Firmware will be written against the PRD paths.
+1. **Fingerprint matching (blocks the pilot):** `KioskSessions.MatchAsync` compares decrypted templates for exact equality. Two AS608 captures of the same finger are never byte-identical, so real scans will not match. Pick a matcher. One option: the kiosk uploads the sensor image and the API matches with SourceAFIS (1:N in PostgreSQL, as FR-1.3 asks). That changes the enrollment payload too.
+2. **Push notifications:** no FCM yet, and there is no device-token registration route. Notices are `notifications` rows plus SignalR events. A phone in the background gets nothing until push is wired.
+3. **Custodian fingerprint rights:** custodians can start enrollments and delete fingerprints; FR-9.4 says "admin-initiated".
 4. **`/users` reads:** ADMIN and TECH_STAFF can read (employee numbers included). The original matrix said admin-only.
+5. **Event loans:** no coordinator freeze on overdue (the ladder names the approving instructor only), and no liability on missing, because `liabilities.student_id` is required.
 
 ## Known gaps
 
-- Not built: `POST /students` (import is the only way to create students), room RFID tags and station credentials (the PRD defines neither), the `reset-term` warnings route, `GET /dashboard/summary`, checkout/return flow, SignalR hub, station heartbeat and health sweep.
+- Not built: room RFID tags and station credentials (the PRD defines neither), push delivery (Open decisions #2), stored report files (`audits.report_file_id` stays null; reports render on request), Excel export (the checklist is CSV, which Excel opens).
 - Column names use a `_user_id` suffix where PRD 7.3 says `enrolled_by`, `started_by`, etc. Web and mobile need the final names.
 - `sections` and `asset_categories` have no `created_at` or `updated_at`; the PRD is ambiguous.
 - Roster CSV columns and limits are our own design (the PRD has none). Check the student-number pattern against the school's real format.
@@ -60,9 +77,10 @@ Jira (project TAMS): TAMS-19 and TAMS-21 are in Deep Review and assumed approved
 
 ## Next steps
 
-1. Start Docker, `cp .env.example .env` (set `POSTGRES_PASSWORD`, `JWT_KEY` of 32 or more characters, and optionally `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD`), `docker compose up --build`, and check `/health`.
-2. Confirm both migrations apply and the tables, partial indexes and checks exist (`psql \dt`, `\d+`).
-3. Walk the main flows with the seeded admin: login, refresh and reuse detection, create a user, asset, room and station, import a roster, run an enrollment session, generate a QR sheet.
-4. Settle the four open decisions.
-5. Push `pre-dev` and the ticket branches to origin; open the PR from `pre-dev` to `dev`.
-6. Update the Jira statuses.
+1. Pick the fingerprint matcher (Open decisions #1) and replace `KioskSessions.MatchAsync`.
+2. Write the kiosk and room-station firmware against `Kiosk/` (README "Kiosk and stations").
+3. Wire FCM push and a device-token route (Open decisions #2).
+4. Still unexercised from pre-dev: refresh and reuse detection, roster CSV import, the QR sheet and `docker compose up` itself (the smoke run used `dotnet run` against a PostgreSQL container).
+5. Settle the remaining open decisions.
+6. Push `pre-dev`, the ticket branches and `feature/prd-transaction-core` to origin; open the PRs into `dev`.
+7. Update the Jira statuses.
